@@ -1,4 +1,5 @@
 const video = document.getElementById("video");
+let faceMatcher; // Declare faceMatcher in the outer scope
 
 Promise.all([
   faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
@@ -20,53 +21,76 @@ function startWebcam() {
     });
 }
 
-function getLabeledFaceDescriptions() {
+async function getLabeledFaceDescriptions() {
   const labels = ["Felipe", "Messi", "Data"];
   return Promise.all(
     labels.map(async (label) => {
-      const descriptions = [];
-      for (let i = 1; i <= 2; i++) {
-        const img = await faceapi.fetchImage(`./labels/${label}/${i}.png`);
-        const detections = await faceapi
-          .detectSingleFace(img)
-          .withFaceLandmarks()
-          .withFaceDescriptor();
-        descriptions.push(detections.descriptor);
+      try {
+        const descriptions = [];
+        const imageMap = {};
+
+        for (let i = 1; i <= 2; i++) {
+          let img;
+          if (!imageMap[label + i]) {
+            img = await faceapi.fetchImage(`./labels/${label}/${i}.png`);
+            imageMap[label + i] = img;
+          } else {
+            img = imageMap[label + i];
+          }
+
+          const detections = await faceapi
+            .detectSingleFace(img)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+          descriptions.push(detections.descriptor);
+        }
+
+        return new faceapi.LabeledFaceDescriptors(label, descriptions);
+      } catch (error) {
+        console.error(`Error getting labeled face descriptors for ${label}:`, error);
       }
-      return new faceapi.LabeledFaceDescriptors(label, descriptions);
     })
   );
 }
 
+let lastFrameTime = 0;
+const displayCanvas = faceapi.createCanvasFromMedia(video);
+document.body.append(displayCanvas);
+
+const displaySize = { width: video.width, height: video.height };
+faceapi.matchDimensions(displayCanvas, displaySize);
+
+async function drawFaces() {
+  const canvas = displayCanvas.getContext("2d");
+  canvas.clearRect(0, 0, canvas.width, canvas.height);
+
+  const detections = await faceapi
+    .detectAllFaces(video, new faceapi.SsdMobilenetv1Options())
+    .withFaceDescriptors();
+
+  const resizedDetections = faceapi.resizeResults(detections, {
+    height: video.height,
+    width: video.width,
+  });
+
+  const results = resizedDetections.map((d) => {
+    return faceMatcher.findBestMatch(d.descriptor);
+  });
+
+  results.forEach((result, i) => {
+    const box = resizedDetections[i].detection.box;
+    const drawBox = new faceapi.draw.DrawBox(box, {
+      label: result,
+    });
+    drawBox.draw(canvas);
+  });
+
+  requestAnimationFrame(drawFaces);
+}
+
 video.addEventListener("play", async () => {
   const labeledFaceDescriptors = await getLabeledFaceDescriptions();
-  const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
+  faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
 
-  const canvas = faceapi.createCanvasFromMedia(video);
-  document.body.append(canvas);
-
-  const displaySize = { width: video.width, height: video.height };
-  faceapi.matchDimensions(canvas, displaySize);
-
-  setInterval(async () => {
-    const detections = await faceapi
-      .detectAllFaces(video)
-      .withFaceLandmarks()
-      .withFaceDescriptors();
-
-    const resizedDetections = faceapi.resizeResults(detections, displaySize);
-
-    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
-
-    const results = resizedDetections.map((d) => {
-      return faceMatcher.findBestMatch(d.descriptor);
-    });
-    results.forEach((result, i) => {
-      const box = resizedDetections[i].detection.box;
-      const drawBox = new faceapi.draw.DrawBox(box, {
-        label: result,
-      });
-      drawBox.draw(canvas);
-    });
-  }, 100);
+  drawFaces();
 });
